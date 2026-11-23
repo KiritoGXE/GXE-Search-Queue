@@ -1,0 +1,20 @@
+# Build context exclusions for the Docker image
+.git
+.github
+docker
+docs
+target
+tests
+config
+*.md
+.editorconfig
+.gitignore
+.env
+.env.*
+Dockerfile
+compose.yaml
+CHANGELOG.md
+CODE_OF_CONDUCT.md
+CONTRIBUTING.md
+LICENSE
+SECURITY.md

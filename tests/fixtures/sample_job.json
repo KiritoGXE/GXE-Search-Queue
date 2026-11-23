@@ -1,0 +1,6 @@
+{
+  "job_id": "job-1001",
+  "query": "rust distributed queue",
+  "priority": 1,
+  "max_retries": 3
+}

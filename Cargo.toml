@@ -1,0 +1,21 @@
+[package]
+name = "gxe-search-queue"
+version = "0.1.0"
+edition = "2021"
+authors = ["GXE Team"]
+description = "Distributed, fault-tolerant queue and processing engine for search workloads."
+license = "MIT"
+readme = "README.md"
+
+[dependencies]
+# Async runtime & web
+tokio = { version = "1", features = ["full"] }
+axum = "0.7"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dotenvy = "0.15"
+
+[dev-dependencies]
+tokio-test = "0.4"
