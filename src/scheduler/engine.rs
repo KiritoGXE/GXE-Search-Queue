@@ -206,8 +206,22 @@ impl Database {
 
     /// Keep ambiguous operations active until reconciliation proves their state.
     pub async fn mark_search_ambiguous(&self, run_id: &str) -> Result<bool, DatabaseError> {
+        let mut tx = self.pool().begin().await?;
         let result = sqlx::query("UPDATE search_runs SET state='reconciling' WHERE id=? AND state IN ('submitting', 'active')")
-            .bind(run_id).execute(self.pool()).await?;
+            .bind(run_id).execute(&mut *tx).await?;
+        if result.rows_affected() == 1 {
+            sqlx::query(
+                "INSERT INTO dashboard_events (id, kind, severity, message, created_at) \
+                 SELECT ?, 'search_outcome_ambiguous', 'warning', \
+                 'A search outcome is uncertain. Reconcile the external operation before retrying.', unixepoch() \
+                 WHERE NOT EXISTS (SELECT 1 FROM dashboard_events \
+                 WHERE kind='search_outcome_ambiguous' AND acknowledged_at IS NULL)",
+            )
+            .bind(Uuid::new_v4().to_string())
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
         Ok(result.rows_affected() == 1)
     }
 
@@ -266,6 +280,21 @@ impl Database {
             .await?;
         sqlx::query("UPDATE queue_jobs SET state=?, next_attempt_at=?, no_result_attempts=no_result_attempts + ?, updated_at=? WHERE id=?")
             .bind(job_state).bind(next_attempt).bind(if increment_attempts { 1_i64 } else { 0_i64 }).bind(now).bind(job_id).execute(&mut *tx).await?;
+        if matches!(outcome, SearchOutcome::TechnicalError) {
+            // Keep secrets and raw external error payloads out of dashboard events.
+            // Collapse repeated technical errors into one active notification.
+            sqlx::query(
+                "INSERT INTO dashboard_events (id, kind, severity, message, created_at) \
+                 SELECT ?, 'search_technical_error', 'error', \
+                 'A search encountered a technical error and needs administrator review.', ? \
+                 WHERE NOT EXISTS (SELECT 1 FROM dashboard_events \
+                 WHERE kind='search_technical_error' AND acknowledged_at IS NULL)",
+            )
+            .bind(Uuid::new_v4().to_string())
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
+        }
         tx.commit().await?;
         Ok(true)
     }

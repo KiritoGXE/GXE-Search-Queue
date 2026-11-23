@@ -37,6 +37,9 @@ The app container does not install or modify the media services. See
   fairness, episode ordering, no-result retry delays, and manual priority.
 - Search command polling, download/library checks, and manual reconciliation
   when an external command's outcome is ambiguous.
+- Persistent dashboard alerts for technical search failures and uncertain
+  external outcomes, plus service outage/restoration transitions. Repeated
+  active alerts are grouped until acknowledged.
 - Dashboard controls for pausing, prioritizing, retrying, removing unstarted
   jobs, and changing core scheduler settings.
 
@@ -50,6 +53,9 @@ The app container does not install or modify the media services. See
   not proof of indexer protection.
 - Technical errors and uncertain command results are held for administrator
   reconciliation because safe automatic retry behavior is not finalized.
+- Dashboard notifications cover technical search failures, ambiguous outcomes,
+  and observed service availability transitions. Indexer cooldown and queue
+  completion alerts are not yet wired into the event feed.
 - TV request modifications, season-pack satisfaction, and comprehensive
   recovery scenarios still need integration validation.
 - Authentication is a single local administrator token. Deploy only on a

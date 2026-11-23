@@ -4,6 +4,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 use reqwest::{Client, StatusCode};
 use serde_json::{json, Value};
 use thiserror::Error;
+use uuid::Uuid;
 
 use crate::{
     core::{MediaType, QueueJobState},
@@ -821,6 +822,13 @@ impl Integrations {
         available: bool,
         detail: Option<&str>,
     ) -> Result<(), DatabaseError> {
+        let mut tx = db.pool().begin().await?;
+        let previous: Option<(i64,)> = sqlx::query_as(
+            "SELECT available FROM service_health WHERE service=?",
+        )
+        .bind(service)
+        .fetch_optional(&mut *tx)
+        .await?;
         sqlx::query(
             "INSERT INTO service_health (service, available, checked_at, detail) VALUES (?, ?, unixepoch(), ?) \
              ON CONFLICT(service) DO UPDATE SET available=excluded.available, checked_at=excluded.checked_at, detail=excluded.detail",
@@ -828,8 +836,56 @@ impl Integrations {
         .bind(service)
         .bind(if available { 1_i64 } else { 0_i64 })
         .bind(detail)
-        .execute(db.pool())
+        .execute(&mut *tx)
         .await?;
+
+        let changed = previous.is_some_and(|(was_available,)| (was_available != 0) != available);
+        let initial_failure = previous.is_none() && !available && detail != Some("not configured");
+        if changed || initial_failure {
+            let service_title = match service {
+                "seerr" => "Seerr",
+                "radarr" => "Radarr",
+                "sonarr" => "Sonarr",
+                "prowlarr" => "Prowlarr",
+                _ => service,
+            };
+            if available {
+                let outage_kind = format!("service_unavailable_{service}");
+                sqlx::query(
+                    "UPDATE dashboard_events SET acknowledged_at=unixepoch() \
+                     WHERE kind=? AND acknowledged_at IS NULL",
+                )
+                .bind(outage_kind)
+                .execute(&mut *tx)
+                .await?;
+            }
+            let (kind, severity, message) = if available {
+                (
+                    format!("service_restored_{service}"),
+                    "info",
+                    format!("{service_title} is available again."),
+                )
+            } else {
+                (
+                    format!("service_unavailable_{service}"),
+                    "warning",
+                    format!("{service_title} is unavailable. Related queue work may be waiting."),
+                )
+            };
+            sqlx::query(
+                "INSERT INTO dashboard_events (id, kind, severity, message, created_at) \
+                 SELECT ?, ?, ?, ?, unixepoch() \
+                 WHERE NOT EXISTS (SELECT 1 FROM dashboard_events WHERE kind=? AND acknowledged_at IS NULL)",
+            )
+            .bind(Uuid::new_v4().to_string())
+            .bind(&kind)
+            .bind(severity)
+            .bind(message)
+            .bind(&kind)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
         Ok(())
     }
 }

@@ -4,6 +4,7 @@ import './style.css';
 
 type Job = { id: string; media_type: string; title: string; state: string; priority: number; next_attempt_at?: number; no_result_attempts: number };
 type Status = { paused: boolean; counts: Record<string, number>; active_search?: { id: string; state: string; job_id: string } | null; services: { service: string; available: boolean; detail?: string }[]; active_cooldowns: number };
+type DashboardEvent = { id: string; kind: string; severity: string; message: string; created_at: number; acknowledged_at?: number | null };
 const storedToken = () => sessionStorage.getItem('gxe-token') || '';
 
 function App() {
@@ -11,6 +12,7 @@ function App() {
   const [status, setStatus] = useState<Status | null>(null);
   const [jobs, setJobs] = useState<Job[]>([]);
   const [runs, setRuns] = useState<any[]>([]);
+  const [events, setEvents] = useState<DashboardEvent[]>([]);
   const [settings, setSettings] = useState<any>({});
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -25,8 +27,8 @@ function App() {
   const refresh = useCallback(async () => {
     if (!token) return;
     try {
-      const [s, q, h, prefs] = await Promise.all([api('status'), api('queue'), api('history'), api('settings')]);
-      setStatus(s); setJobs(q.items); setRuns(h.items); setSettings(prefs); setError('');
+      const [s, q, h, prefs, notices] = await Promise.all([api('status'), api('queue'), api('history'), api('settings'), api('events')]);
+      setStatus(s); setJobs(q.items); setRuns(h.items); setSettings(prefs); setEvents(notices.items); setError('');
     } catch (e) { setError(e instanceof Error ? e.message : 'Unable to load dashboard'); }
   }, [api, token]);
   useEffect(() => { void refresh(); const timer = window.setInterval(refresh, 10000); return () => window.clearInterval(timer); }, [refresh]);
@@ -40,6 +42,7 @@ function App() {
   return <div className="shell"><aside><div className="brand"><div className="brand-mark">G</div><div><b>GXE</b><small>SEARCH QUEUE</small></div></div><nav><a className="selected">◈ &nbsp; Overview</a><a href="#queue">▤ &nbsp; Queue</a><a href="#history">◷ &nbsp; History</a><a href="#settings">⚙ &nbsp; Settings</a></nav><div className="sidebar-bottom"><span className="dot green"/> Local instance <button className="link" onClick={() => { sessionStorage.removeItem('gxe-token'); setToken(''); }}>Sign out</button></div></aside>
     <main className="content"><header><div><p className="eyebrow">CONTROL CENTER</p><h1>Overview</h1></div><div className="head-actions"><span className="live"><i/> LIVE</span><button className={status?.paused ? 'primary' : 'secondary'} disabled={busy} onClick={() => action('queue/pause', 'POST', { paused: !status?.paused })}>{status?.paused ? 'Resume queue' : 'Pause queue'}</button></div></header>
       {error && <div className="alert">{error}</div>}
+      <section className="panel notices-panel"><div className="panel-head"><div><p className="eyebrow">ADMIN NOTIFICATIONS</p><h2>Needs attention</h2></div></div><div className="event-list">{events.filter(event => !event.acknowledged_at).map(event => <div className={`event event-${event.severity}`} key={event.id}><div><b>{event.message}</b><small>{new Date(event.created_at * 1000).toLocaleString()}</small></div><button className="secondary" disabled={busy} onClick={() => action(`events/${event.id}/ack`)}>Acknowledge</button></div>)}{!events.some(event => !event.acknowledged_at) && <p className="event-empty">No active notifications.</p>}</div></section>
       {status?.paused && <div className="notice"><b>Queue paused</b><span>Queued work is preserved. Resume to continue scheduling.</span></div>}
       <div className="notice"><b>Preview safety</b><span>Disable Seerr automatic search before resuming. Prowlarr per-indexer 429 handling is not implemented or validated; GXE does not guarantee indexer protection.</span></div>
       <section className="stats"><article><span>ACTIVE WORK</span><strong>{activeRun ? '1' : '0'}</strong><small>{activeRun ? `Run ${activeRun.id.slice(0, 8)} · ${activeRun.state}` : 'No search in progress'}</small></article><article><span>QUEUE SIZE</span><strong>{(status?.counts?.movies || 0) + (status?.counts?.episodes || 0)}</strong><small>{status?.counts?.movies || 0} movies · {status?.counts?.episodes || 0} episodes</small></article><article><span>SUSPENDED</span><strong>{status?.counts?.suspended || 0}</strong><small>Needs attention or retry</small></article><article><span>INDEXER COOLDOWNS</span><strong>{status?.active_cooldowns || 0}</strong><small>Scheduling waits while active</small></article></section>

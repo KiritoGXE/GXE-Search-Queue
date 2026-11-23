@@ -55,6 +55,8 @@ pub fn router(database: Database, admin_token: String, web_dist: PathBuf) -> Rou
         .route("/status", get(status))
         .route("/queue", get(queue))
         .route("/history", get(history))
+        .route("/events", get(events))
+        .route("/events/:id/ack", post(acknowledge_event))
         .route("/cooldowns", get(cooldowns))
         .route("/settings", get(settings).put(update_settings))
         .route("/queue/pause", post(set_pause))
@@ -181,6 +183,39 @@ async fn history(State(state): State<ApiState>) -> Result<Json<Value>, ApiError>
         "completed_at": run.completed_at,
         "detail": run.outcome_detail,
     })).collect::<Vec<_>>()})))
+}
+
+async fn events(State(state): State<ApiState>) -> Result<Json<Value>, ApiError> {
+    let rows: Vec<(String, String, String, String, i64, Option<i64>)> = sqlx::query_as(
+        "SELECT id, kind, severity, message, created_at, acknowledged_at \
+         FROM dashboard_events ORDER BY created_at DESC LIMIT 100",
+    )
+    .fetch_all(state.database.pool())
+    .await
+    .map_err(DatabaseError::from)?;
+    Ok(Json(json!({"items": rows.into_iter().map(|(id, kind, severity, message, created_at, acknowledged_at)| json!({
+        "id": id,
+        "kind": kind,
+        "severity": severity,
+        "message": message,
+        "created_at": created_at,
+        "acknowledged_at": acknowledged_at,
+    })).collect::<Vec<_>>()})))
+}
+
+async fn acknowledge_event(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let result = sqlx::query(
+        "UPDATE dashboard_events SET acknowledged_at=? WHERE id=? AND acknowledged_at IS NULL",
+    )
+    .bind(unix_now())
+    .bind(id)
+    .execute(state.database.pool())
+    .await
+    .map_err(DatabaseError::from)?;
+    Ok(Json(json!({"acknowledged": result.rows_affected() == 1})))
 }
 
 async fn cooldowns(State(state): State<ApiState>) -> Result<Json<Value>, ApiError> {

@@ -19,7 +19,10 @@ This is an experimental preview and is not production-ready.
 3. Complete the technical specification and agree remaining technical retry,
    notification, and release-date policies.
 4. Add webhook ingestion, reliable season/request modification reconciliation,
-   structured dashboard notifications, and full settings/health details.
+   complete dashboard notification coverage (including indexer and queue
+   completion events), and full settings/health details. Technical failure,
+   ambiguous-outcome, and service availability alerts are implemented; other
+   required event types remain outstanding.
 5. Add focused unit and integration coverage for scheduler fairness, request
    deduplication/cancellation, 50+ concurrent requests, large queues, timeout
    ambiguity, HTTP 429, imports, and restart recovery.
