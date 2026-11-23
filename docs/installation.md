@@ -1,40 +1,80 @@
 # Installation Guide
 
+> ⚠️ *Official images are not yet published. This document describes the target installation methods; they will be available from the 0.1.0 release onward.*
+
 ## Prerequisites
 
-- **Rust** 1.75+ (install via `rustup` if building from source)
-- **Docker & Docker Compose** (for containerized local development)
-- **PostgreSQL** 14+
-- **Redis** 7+
+- **Docker** and **Docker Compose** (recommended)
+- Running instances of at least one of: **Seerr**, **Radarr**, **Sonarr**, **Prowlarr**
+- Access to the APIs of the applications you want to integrate (API keys)
 
-## Option A: Docker Compose (Recommended for local evaluation)
+Supported platforms: **Linux AMD64** and **Linux ARM64**.
+
+## Option A: Official Docker image (recommended)
+
+Official images are published to GitHub Container Registry:
+
+```
+ghcr.io/kiritogxe/gxe-search-queue
+```
+
+```sh
+# Pull the latest tagged release
+docker pull ghcr.io/kiritogxe/gxe-search-queue:latest
+
+# Run with a persistent data volume
+docker run -d \
+  --name gxe-search-queue \
+  --restart unless-stopped \
+  -p 8080:8080 \
+  -v gxe-search-queue-data:/app/data \
+  ghcr.io/kiritogxe/gxe-search-queue:latest
+```
+
+Configure via environment variables (copy `.env.example` as a starting point):
+
+```sh
+docker run -d \
+  --name gxe-search-queue \
+  --env-file ./gxe-search-queue.env \
+  -p 8080:8080 \
+  -v gxe-search-queue-data:/app/data \
+  ghcr.io/kiritogxe/gxe-search-queue:latest
+```
+
+Pinned versions are preferred for production (e.g. `:0.1.0` instead of `:latest`).
+
+## Option B: Docker Compose (local development / evaluation)
 
 1. Clone the repository:
    ```sh
-   git clone https://github.com/your-org/gxe-search-queue.git
+   git clone https://github.com/KiritoGXE/gxe-search-queue.git
    cd gxe-search-queue
    ```
 
-2. Copy the sample environment file:
+2. Copy the sample environment file and adjust:
    ```sh
    cp .env.example .env
    ```
 
-3. Launch the container stack:
+3. Launch the stack:
    ```sh
    docker compose up -d
    ```
 
-4. Verify services:
-   - REST API: `http://localhost:8080/health`
+4. Verify:
+   - API: `http://localhost:8080`
    - Dashboard: `http://localhost:8081`
 
-## Option B: Native Build (For development)
+## Option C: Self-build from source
 
-1. Ensure Postgres and Redis are running (e.g. via `docker compose up -d postgres redis`).
+Build and run the image directly from the repository (see [Development guide](development.md) for the toolchain):
 
-2. Build and run via Cargo:
-   ```sh
-   cp .env.example .env
-   cargo run -- serve
-   ```
+```sh
+docker build -t gxe-search-queue:dev .
+docker run --rm gxe-search-queue:dev --help
+```
+
+## Configuration reference
+
+See [configuration.md](configuration.md) for the full list of environment variables and configuration options.
