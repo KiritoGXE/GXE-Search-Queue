@@ -823,12 +823,11 @@ impl Integrations {
         detail: Option<&str>,
     ) -> Result<(), DatabaseError> {
         let mut tx = db.pool().begin().await?;
-        let previous: Option<(i64,)> = sqlx::query_as(
-            "SELECT available FROM service_health WHERE service=?",
-        )
-        .bind(service)
-        .fetch_optional(&mut *tx)
-        .await?;
+        let previous: Option<(i64,)> =
+            sqlx::query_as("SELECT available FROM service_health WHERE service=?")
+                .bind(service)
+                .fetch_optional(&mut *tx)
+                .await?;
         sqlx::query(
             "INSERT INTO service_health (service, available, checked_at, detail) VALUES (?, ?, unixepoch(), ?) \
              ON CONFLICT(service) DO UPDATE SET available=excluded.available, checked_at=excluded.checked_at, detail=excluded.detail",

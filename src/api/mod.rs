@@ -193,14 +193,16 @@ async fn events(State(state): State<ApiState>) -> Result<Json<Value>, ApiError> 
     .fetch_all(state.database.pool())
     .await
     .map_err(DatabaseError::from)?;
-    Ok(Json(json!({"items": rows.into_iter().map(|(id, kind, severity, message, created_at, acknowledged_at)| json!({
+    Ok(Json(
+        json!({"items": rows.into_iter().map(|(id, kind, severity, message, created_at, acknowledged_at)| json!({
         "id": id,
         "kind": kind,
         "severity": severity,
         "message": message,
         "created_at": created_at,
         "acknowledged_at": acknowledged_at,
-    })).collect::<Vec<_>>()})))
+    })).collect::<Vec<_>>()}),
+    ))
 }
 
 async fn acknowledge_event(
