@@ -47,13 +47,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             "Persisted searches need external reconciliation before scheduling can resume"
         );
     }
-    let admin_token = env::var("GXE_ADMIN_TOKEN")
-        .map_err(|_| "GXE_ADMIN_TOKEN is required; set a random secret of at least 32 characters")?;
+    let admin_token = env::var("GXE_ADMIN_TOKEN").map_err(|_| {
+        "GXE_ADMIN_TOKEN is required; set a random secret of at least 32 characters"
+    })?;
     if admin_token.len() < 32 || admin_token.starts_with("replace-with-") {
-        return Err("Set GXE_ADMIN_TOKEN to a unique random secret of at least 32 characters".into());
+        return Err(
+            "Set GXE_ADMIN_TOKEN to a unique random secret of at least 32 characters".into(),
+        );
     }
     let bind = env::var("API_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0".into());
-    let port = env::var("API_PORT").ok().and_then(|value| value.parse().ok()).unwrap_or(8080);
+    let port = env::var("API_PORT")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(8080);
     let address = api::parse_bind_address(&bind, port)?;
     let web_dist = env::var("WEB_DIST").unwrap_or_else(|_| "/app/web".into());
     let app = api::router(database.clone(), admin_token, web_dist.into());
@@ -65,7 +71,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let listener = tokio::net::TcpListener::bind(address).await?;
     tracing::info!(%address, path = %database_path, "GXE Search Queue API and dashboard listening");
     axum::serve(listener, app)
-        .with_graceful_shutdown(async { let _ = tokio::signal::ctrl_c().await; })
+        .with_graceful_shutdown(async {
+            let _ = tokio::signal::ctrl_c().await;
+        })
         .await?;
     worker.abort();
     database.close().await;
@@ -110,27 +118,67 @@ async fn run_worker(database: Database, integrations: Integrations) {
             }
             external_checked = now;
         }
-        if external_search_active { continue; }
+        if external_search_active {
+            continue;
+        }
         match database.claim_next_search(now, availability, &policy).await {
             Ok(Some(claimed)) => {
                 let Some(manager_id) = claimed.job.external_manager_id else {
-                    let _ = database.finish_search(&claimed.run_id, SearchOutcome::TechnicalError, unix_now(), Some("missing Radarr/Sonarr identifier")).await;
+                    let _ = database
+                        .finish_search(
+                            &claimed.run_id,
+                            SearchOutcome::TechnicalError,
+                            unix_now(),
+                            Some("missing Radarr/Sonarr identifier"),
+                        )
+                        .await;
                     continue;
                 };
-                match integrations.is_satisfied(claimed.job.media_type, manager_id).await {
+                match integrations
+                    .is_satisfied(claimed.job.media_type, manager_id)
+                    .await
+                {
                     Ok(true) => {
-                        let _ = database.finish_search(&claimed.run_id, SearchOutcome::AlreadySatisfied, unix_now(), Some("already present in library")).await;
+                        let _ = database
+                            .finish_search(
+                                &claimed.run_id,
+                                SearchOutcome::AlreadySatisfied,
+                                unix_now(),
+                                Some("already present in library"),
+                            )
+                            .await;
                         continue;
                     }
                     Err(error) => {
-                        let _ = database.finish_search(&claimed.run_id, SearchOutcome::TechnicalError, unix_now(), Some(&error.to_string())).await;
+                        let _ = database
+                            .finish_search(
+                                &claimed.run_id,
+                                SearchOutcome::TechnicalError,
+                                unix_now(),
+                                Some(&error.to_string()),
+                            )
+                            .await;
                         continue;
                     }
                     Ok(false) => {}
                 }
-                let timeout = database.setting_value("search_timeout_seconds").await.ok().flatten()
-                    .and_then(|value| value.parse::<u64>().ok()).unwrap_or(900);
-                match integrations.search_one(&database, &claimed.run_id, claimed.job.media_type, manager_id, timeout).await {
+                let timeout = database
+                    .setting_value("search_timeout_seconds")
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .unwrap_or(900);
+                match integrations
+                    .search_one(
+                        &database,
+                        &claimed.run_id,
+                        claimed.job.media_type,
+                        manager_id,
+                        timeout,
+                    )
+                    .await
+                {
                     Ok(outcome) => {
                         let detail = match outcome {
                             SearchOutcome::Found => "A matching manager queue item or library file was detected",
@@ -138,7 +186,10 @@ async fn run_worker(database: Database, integrations: Integrations) {
                             SearchOutcome::AlreadySatisfied => "The media was already satisfied before search",
                             SearchOutcome::TechnicalError => "The external service reported a technical error",
                         };
-                        if let Err(error) = database.finish_search(&claimed.run_id, outcome, unix_now(), Some(detail)).await {
+                        if let Err(error) = database
+                            .finish_search(&claimed.run_id, outcome, unix_now(), Some(detail))
+                            .await
+                        {
                             tracing::error!(%error, run_id = %claimed.run_id, "Could not finish search run");
                         }
                     }

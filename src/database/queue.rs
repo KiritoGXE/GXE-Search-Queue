@@ -283,7 +283,9 @@ impl Database {
                  AND NOT EXISTS (SELECT 1 FROM request_jobs rj JOIN requests r ON r.id=rj.request_id WHERE rj.job_id=queue_jobs.id AND r.active=1)",
             ).bind(now).bind(request_id).execute(&mut *tx).await?;
             sqlx::query("DELETE FROM request_jobs WHERE request_id=?")
-                .bind(request_id).execute(&mut *tx).await?;
+                .bind(request_id)
+                .execute(&mut *tx)
+                .await?;
         }
         tx.commit().await?;
         Ok(())
@@ -313,8 +315,13 @@ impl Database {
         satisfied_state: QueueJobState,
         now: i64,
     ) -> Result<bool, DatabaseError> {
-        if !matches!(satisfied_state, QueueJobState::Completed | QueueJobState::Satisfied) {
-            return Err(DatabaseError::InvalidData("external reconciliation requires a satisfied terminal state".into()));
+        if !matches!(
+            satisfied_state,
+            QueueJobState::Completed | QueueJobState::Satisfied
+        ) {
+            return Err(DatabaseError::InvalidData(
+                "external reconciliation requires a satisfied terminal state".into(),
+            ));
         }
         let result = sqlx::query(
             "UPDATE queue_jobs SET state=?, next_attempt_at=NULL, updated_at=? \
@@ -341,7 +348,11 @@ impl Database {
         rows.into_iter().map(QueueJob::try_from).collect()
     }
 
-    pub async fn deactivate_seerr_request(&self, external_id: &str, now: i64) -> Result<(), DatabaseError> {
+    pub async fn deactivate_seerr_request(
+        &self,
+        external_id: &str,
+        now: i64,
+    ) -> Result<(), DatabaseError> {
         let row: Option<(String,)> = sqlx::query_as(
             "SELECT id FROM requests WHERE source='seerr' AND external_id=? AND active=1",
         )
@@ -365,7 +376,10 @@ impl Database {
         .fetch_all(self.pool())
         .await?;
         for (id, external_id) in rows {
-            if !active_external_ids.iter().any(|active| active == &external_id) {
+            if !active_external_ids
+                .iter()
+                .any(|active| active == &external_id)
+            {
                 self.set_request_active(&id, false, now).await?;
             }
         }
@@ -391,11 +405,21 @@ impl Database {
         counts.insert("episodes".into(), serde_json::Value::from(0));
         counts.insert("suspended".into(), serde_json::Value::from(0));
         for (media_type, state, count) in rows {
-            let bucket = if media_type == "movie" { "movies" } else { "episodes" };
-            let old = counts.get(bucket).and_then(serde_json::Value::as_i64).unwrap_or(0);
+            let bucket = if media_type == "movie" {
+                "movies"
+            } else {
+                "episodes"
+            };
+            let old = counts
+                .get(bucket)
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(0);
             counts.insert(bucket.into(), serde_json::Value::from(old + count));
             if state == "suspended" {
-                let old = counts.get("suspended").and_then(serde_json::Value::as_i64).unwrap_or(0);
+                let old = counts
+                    .get("suspended")
+                    .and_then(serde_json::Value::as_i64)
+                    .unwrap_or(0);
                 counts.insert("suspended".into(), serde_json::Value::from(old + count));
             }
         }

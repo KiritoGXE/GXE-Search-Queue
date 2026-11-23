@@ -11,7 +11,10 @@ use axum::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 use subtle::ConstantTimeEq;
-use tower_http::{services::{ServeDir, ServeFile}, trace::TraceLayer};
+use tower_http::{
+    services::{ServeDir, ServeFile},
+    trace::TraceLayer,
+};
 
 use crate::{
     core::SearchRun,
@@ -36,7 +39,9 @@ impl From<DatabaseError> for ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status = match self.0 {
-            DatabaseError::InvalidData(_) | DatabaseError::RequestNotApproved | DatabaseError::MediaNotAvailable => StatusCode::BAD_REQUEST,
+            DatabaseError::InvalidData(_)
+            | DatabaseError::RequestNotApproved
+            | DatabaseError::MediaNotAvailable => StatusCode::BAD_REQUEST,
             DatabaseError::QueueCapacityReached => StatusCode::CONFLICT,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
@@ -58,18 +63,27 @@ pub fn router(database: Database, admin_token: String, web_dist: PathBuf) -> Rou
         .route("/queue/:id/retry", post(force_retry))
         .route("/queue/:id", delete(remove_job))
         .route("/runs/:id/reconcile", post(reconcile_run))
-        .route_layer(middleware::from_fn_with_state(admin_token, require_admin_token))
+        .route_layer(middleware::from_fn_with_state(
+            admin_token,
+            require_admin_token,
+        ))
         .with_state(state);
 
     let index = web_dist.join("index.html");
     Router::new()
-        .route("/api/health", get(|| async { Json(json!({"status": "ok"})) }))
+        .route(
+            "/api/health",
+            get(|| async { Json(json!({"status": "ok"})) }),
+        )
         .nest("/api/v1", protected)
         .fallback_service(ServeDir::new(web_dist).fallback(ServeFile::new(index)))
         .layer(TraceLayer::new_for_http())
 }
 
-pub fn parse_bind_address(address: &str, port: u16) -> Result<SocketAddr, std::net::AddrParseError> {
+pub fn parse_bind_address(
+    address: &str,
+    port: u16,
+) -> Result<SocketAddr, std::net::AddrParseError> {
     format!("{address}:{port}").parse()
 }
 
@@ -95,24 +109,34 @@ async fn require_admin_token(
     if same_length & same_value == 1 {
         next.run(request).await
     } else {
-        (StatusCode::UNAUTHORIZED, Json(json!({"error": "unauthorized"}))).into_response()
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": "unauthorized"})),
+        )
+            .into_response()
     }
 }
 
 async fn status(State(state): State<ApiState>) -> Result<Json<Value>, ApiError> {
     let counts = state.database.queue_counts().await?;
     let active = state.database.active_searches().await?;
-    let paused = state.database.setting_value("global_paused").await?.as_deref() == Some("true");
+    let paused = state
+        .database
+        .setting_value("global_paused")
+        .await?
+        .as_deref()
+        == Some("true");
     let health: Vec<(String, i64, Option<i64>, Option<String>)> = sqlx::query_as(
         "SELECT service, available, checked_at, detail FROM service_health ORDER BY service",
     )
     .fetch_all(state.database.pool())
     .await
     .map_err(DatabaseError::from)?;
-    let cooldowns: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM indexer_cooldowns WHERE cooldown_until > unixepoch()")
-        .fetch_one(state.database.pool())
-        .await
-        .map_err(DatabaseError::from)?;
+    let cooldowns: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM indexer_cooldowns WHERE cooldown_until > unixepoch()")
+            .fetch_one(state.database.pool())
+            .await
+            .map_err(DatabaseError::from)?;
     Ok(Json(json!({
         "paused": paused,
         "counts": counts,
@@ -139,14 +163,16 @@ async fn history(State(state): State<ApiState>) -> Result<Json<Value>, ApiError>
     .fetch_all(state.database.pool())
     .await
     .map_err(DatabaseError::from)?;
-    Ok(Json(json!({"items": rows.into_iter().map(|(id, job_id, state, started_at, completed_at, detail)| json!({
+    Ok(Json(
+        json!({"items": rows.into_iter().map(|(id, job_id, state, started_at, completed_at, detail)| json!({
         "id": id,
         "job_id": job_id,
         "state": state,
         "started_at": started_at,
         "completed_at": completed_at,
         "detail": detail,
-    })).collect::<Vec<_>>()})))
+    })).collect::<Vec<_>>()}),
+    ))
 }
 
 async fn cooldowns(State(state): State<ApiState>) -> Result<Json<Value>, ApiError> {
@@ -156,19 +182,22 @@ async fn cooldowns(State(state): State<ApiState>) -> Result<Json<Value>, ApiErro
     .fetch_all(state.database.pool())
     .await
     .map_err(DatabaseError::from)?;
-    Ok(Json(json!({"items": rows.into_iter().map(|(id, name, cooldown_until, reason)| json!({
+    Ok(Json(
+        json!({"items": rows.into_iter().map(|(id, name, cooldown_until, reason)| json!({
         "id": id,
         "name": name,
         "cooldown_until": cooldown_until,
         "reason": reason,
-    })).collect::<Vec<_>>()})))
+    })).collect::<Vec<_>>()}),
+    ))
 }
 
 async fn settings(State(state): State<ApiState>) -> Result<Json<Value>, ApiError> {
-    let rows: Vec<(String, String)> = sqlx::query_as("SELECT key, value FROM settings ORDER BY key")
-        .fetch_all(state.database.pool())
-        .await
-        .map_err(DatabaseError::from)?;
+    let rows: Vec<(String, String)> =
+        sqlx::query_as("SELECT key, value FROM settings ORDER BY key")
+            .fetch_all(state.database.pool())
+            .await
+            .map_err(DatabaseError::from)?;
     let mut values = json!({
         "minimum_interval_seconds": 600,
         "queue_capacity": 0,
@@ -196,10 +225,34 @@ async fn update_settings(
     Json(input): Json<SettingsInput>,
 ) -> Result<Json<Value>, ApiError> {
     let now = unix_now();
-    state.database.set_setting("minimum_interval_seconds", &input.minimum_interval_seconds.to_string(), now).await?;
-    state.database.set_setting("queue_capacity", &input.queue_capacity.to_string(), now).await?;
-    state.database.set_setting("search_timeout_seconds", &input.search_timeout_seconds.to_string(), now).await?;
-    state.database.set_setting("movie_theatrical_delay_days", &input.movie_theatrical_delay_days.to_string(), now).await?;
+    state
+        .database
+        .set_setting(
+            "minimum_interval_seconds",
+            &input.minimum_interval_seconds.to_string(),
+            now,
+        )
+        .await?;
+    state
+        .database
+        .set_setting("queue_capacity", &input.queue_capacity.to_string(), now)
+        .await?;
+    state
+        .database
+        .set_setting(
+            "search_timeout_seconds",
+            &input.search_timeout_seconds.to_string(),
+            now,
+        )
+        .await?;
+    state
+        .database
+        .set_setting(
+            "movie_theatrical_delay_days",
+            &input.movie_theatrical_delay_days.to_string(),
+            now,
+        )
+        .await?;
     Ok(Json(json!({"saved": true})))
 }
 
@@ -212,7 +265,10 @@ async fn set_pause(
     State(state): State<ApiState>,
     Json(input): Json<PauseInput>,
 ) -> Result<Json<Value>, ApiError> {
-    state.database.set_global_paused(input.paused, unix_now()).await?;
+    state
+        .database
+        .set_global_paused(input.paused, unix_now())
+        .await?;
     Ok(Json(json!({"paused": input.paused})))
 }
 
@@ -221,27 +277,42 @@ async fn empty_queue(State(state): State<ApiState>) -> Result<Json<Value>, ApiEr
     Ok(Json(json!({"dismissed": removed})))
 }
 
-async fn prioritize(State(state): State<ApiState>, Path(id): Path<String>) -> Result<Json<Value>, ApiError> {
+async fn prioritize(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
     if state.database.prioritize_job(&id, unix_now()).await? {
         Ok(Json(json!({"updated": true})))
     } else {
-        Err(ApiError(DatabaseError::InvalidData("job is missing or already started".into())))
+        Err(ApiError(DatabaseError::InvalidData(
+            "job is missing or already started".into(),
+        )))
     }
 }
 
-async fn remove_job(State(state): State<ApiState>, Path(id): Path<String>) -> Result<Json<Value>, ApiError> {
+async fn remove_job(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
     if state.database.remove_unstarted_job(&id, unix_now()).await? {
         Ok(Json(json!({"removed": true})))
     } else {
-        Err(ApiError(DatabaseError::InvalidData("job is missing or already started".into())))
+        Err(ApiError(DatabaseError::InvalidData(
+            "job is missing or already started".into(),
+        )))
     }
 }
 
-async fn force_retry(State(state): State<ApiState>, Path(id): Path<String>) -> Result<Json<Value>, ApiError> {
+async fn force_retry(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
     if state.database.force_retry(&id, unix_now()).await? {
         Ok(Json(json!({"queued": true})))
     } else {
-        Err(ApiError(DatabaseError::InvalidData("job is missing or cannot be retried".into())))
+        Err(ApiError(DatabaseError::InvalidData(
+            "job is missing or cannot be retried".into(),
+        )))
     }
 }
 
@@ -261,12 +332,22 @@ async fn reconcile_run(
         "no_results" => SearchOutcome::NoResults,
         "satisfied" => SearchOutcome::AlreadySatisfied,
         "technical_error" => SearchOutcome::TechnicalError,
-        _ => return Err(ApiError(DatabaseError::InvalidData("unsupported reconciliation outcome".into()))),
+        _ => {
+            return Err(ApiError(DatabaseError::InvalidData(
+                "unsupported reconciliation outcome".into(),
+            )))
+        }
     };
-    if state.database.finish_search(&id, outcome, unix_now(), input.detail.as_deref()).await? {
+    if state
+        .database
+        .finish_search(&id, outcome, unix_now(), input.detail.as_deref())
+        .await?
+    {
         Ok(Json(json!({"reconciled": true})))
     } else {
-        Err(ApiError(DatabaseError::InvalidData("no active run with that id".into())))
+        Err(ApiError(DatabaseError::InvalidData(
+            "no active run with that id".into(),
+        )))
     }
 }
 
