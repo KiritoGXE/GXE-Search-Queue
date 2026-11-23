@@ -3,12 +3,12 @@
 
 **Document version:** 0.1.0
 **Planned software version:** 0.1.0
-**Status:** Preliminary design
+**Status:** Experimental v0.1.0 preview; integrations not live-validated
 **Organization:** GXE Republic
 **License:** Apache License 2.0
-**Planned repository:** `KiritoGXE/gxe-search-queue`
+**GitHub repository:** `KiritoGXE/GXE-Search-Queue`
 **Distribution:** Docker / GitHub Container Registry
-**Technology stack:** To be evaluated
+**Technology stack:** Rust/Tokio/Axum + SQLx/SQLite backend; React/TypeScript frontend (approved)
 
 ---
 
@@ -73,7 +73,9 @@ This separation will allow individual components to be replaced or extended with
 
 ## 4. Technology stack
 
-**Not yet defined.**
+**Approved:** Rust with Tokio and Axum, SQLx and SQLite; React with TypeScript
+for the dashboard. This is a modular monolith. API contracts, detailed module
+boundaries, and integration behavior remain under design and validation.
 
 The choice will take into account:
 
@@ -86,13 +88,14 @@ The choice will take into account:
 - Distribution via Docker.
 - Support for Linux AMD64 and ARM64.
 
-The technology choice will be made before implementation.
+Avoid microservices and additional infrastructure unless validation shows they
+are needed.
 
 ## 5. GitHub repository
 
 Planned repository:
 
-`github.com/KiritoGXE/gxe-search-queue`
+`github.com/KiritoGXE/GXE-Search-Queue`
 
 Preliminary structure:
 
@@ -144,7 +147,7 @@ The final structure will depend on the selected stack.
 
 The project will be Docker-first.
 
-Official distribution will happen through GitHub Container Registry:
+The planned image name for a future release is:
 
 `ghcr.io/kiritogxe/gxe-search-queue`
 
@@ -178,25 +181,106 @@ The project will use Semantic Versioning.
 
 Version 1.0.0 will only be reached after validation of the main features and system reliability.
 
-## 8. Planned features
+## 8. Functional requirements and status
 
-Queue engine features remain those defined in the original functional specification:
+The complete approved behavior is captured in the project owner's master
+prompt. This repository document is a summary; it does not replace those rules.
+Approved requirements include the global queue, one active GXE search, 10-minute
+start-to-start minimum, configurable timeout and capacity, movie/episode job
+granularity, fairness, deduplication, Seerr reconciliation, retry schedule,
+SQLite persistence, authenticated dashboard, dashboard-only notifications,
+and 90-day history.
 
-- Centralized management of Seerr requests.
-- Global queue for movies and episodes.
-- One global search at a time.
-- Minimum 10-minute interval between runs.
-- Request deduplication.
-- Separate management of movies and series.
-- Progressive retries.
-- Indexer cooldown management.
-- Detection of manual searches.
-- State recovery after restarts.
-- Administrative dashboard.
-- 90-day history.
-- Notifications for important events.
+### 8.1 Queue and scheduling
 
-The already-approved functional rules remain unchanged.
+- One global queue and at most one active GXE-managed search.
+- The minimum interval is 10 minutes from the start of the prior search. If a
+  search runs longer than the interval, the next may begin immediately after it
+  finishes. A search timeout is dashboard-configurable and does not prove the
+  external operation failed.
+- Queue capacity is unlimited by default and configurable. State survives
+  restarts.
+- Track command submission, start, completion, interval expiry, timeout, and
+  service availability separately. Reconcile external state before retrying an
+  ambiguous operation.
+- If both movies and episodes are eligible, schedule at most two consecutive
+  searches of one category before giving the other a turn. Avoid series
+  monopolization; process a series' episodes oldest first.
+- An administrator may prioritize an unstarted job, but cannot interrupt an
+  active search or bypass the interval or indexer cooldown.
+
+### 8.2 Media work
+
+- Each search concerns one movie or one episode. Radarr/Sonarr retain control
+  of release selection, quality profiles, season packs, downloads, and imports.
+- Do not search a movie already available, downloading, grabbed, or awaiting
+  import. A found/grabbed result completes the search job; download/import
+  continues independently.
+- For movies, use the digital release date when known; otherwise use theatrical
+  date plus a configurable delay. The proposed initial 30-day delay is not
+  approved. If no usable date exists, wait and refresh metadata without an
+  indexer search.
+- Only episodes in seasons requested through Seerr are followed. Only episodes
+  Sonarr considers available are added; future episodes are not active jobs.
+  Specials monitored by Sonarr are included. Add newly available episodes
+  automatically, including already-aired missing episodes in ended/cancelled
+  series. Sonarr decides between episode searches and season packs.
+- Remove episodes satisfied by a season-pack grab. When a TV request changes,
+  add only newly requested missing episodes and preserve existing work. Retry
+  synchronization if Sonarr has not yet added the requested series.
+- If the last active Seerr request for a series is cancelled, stop following
+  future episodes and cancel its unstarted work. Do not interrupt active
+  searches or delete downloads/imported media.
+
+### 8.3 Requests and reconciliation
+
+- Only approved Seerr requests create work. Manual Radarr/Sonarr additions are
+  observed to avoid duplicate searches but never imported into the GXE queue.
+- Deduplicate movies, series, and episodes. Keep one work item with links to all
+  active Seerr requests and requesters; preserve first-request ordering.
+- Cancelling one duplicate request keeps shared work while another active
+  request remains. Remove unstarted work when none remain; do not interrupt
+  started work.
+- Use Seerr webhooks and periodic reconciliation. Webhooks must be idempotent.
+
+### 8.4 Retries and failures
+
+No-result searches increment the content retry counter using this schedule:
+1 hour, 6 hours, 24 hours, 3 days, 7 days; later attempts wait 7 days and then
+repeat the cycle. Technical failures have a separate configurable policy that
+is not yet finalized and must not increment this counter.
+
+For HTTP 429, respect `Retry-After` when present, otherwise use progressive
+backoff. Cool down only the affected indexer when technically possible. Do not
+count 429 as no-results or let manual retry bypass cooldown. Notify admins after
+several hours of blockage; the exact threshold is open. Suspend global search
+when all usable indexers are unavailable. Do not claim per-indexer protection
+until demonstrated experimentally.
+
+On service outage, suspend only affected work: Radarr for movies, Sonarr for
+episodes, Prowlarr for all searches, and Seerr for request synchronization.
+Resume automatically after recovery. On restart, inspect persisted external
+commands before resuming; never blindly repeat an operation.
+
+### 8.5 Dashboard, security, and retention
+
+Provide a standalone responsive dashboard with authentication. It must show
+application/service/indexer health, current work, queue counts, cooldowns,
+history, and relevant statistics. Admins can pause/resume, prioritize, remove
+unstarted jobs, retry, suspend supported indexers, inspect history, and change
+settings. Emptying the queue requires confirmation. Never expose controls that
+delete torrents or media.
+
+Notifications are dashboard-only, important-event-only, and grouped to avoid
+flooding. Retain search/event history for 90 days without deleting active jobs
+or operational state. Do not commit or log integration secrets.
+
+Technical retry policy and the proposed 30-day theatrical release delay are
+not finalized. Per-indexer cooldown implementation and manual-search detection
+must be validated against supported APIs. A serial GXE queue does not prove
+per-indexer request pacing. Initial persistence and scheduler primitives exist;
+external integrations and user-facing application behavior are not yet
+implemented or validated.
 
 ## 9. Distribution and security principles
 
@@ -217,15 +301,15 @@ The database must be persistent and compatible with progressive schema upgrades.
 | Project identity | Defined |
 | License | Apache-2.0 |
 | Functional requirements | First definition complete |
-| Technology stack | To be evaluated |
-| Internal architecture | To be designed |
-| Database | To be designed |
-| Integration APIs | To be validated |
-| Dashboard | To be designed |
-| Docker | Architecture planned |
+| Technology stack | Approved: Rust/Tokio/Axum, SQLx/SQLite, React/TypeScript |
+| Internal architecture | Modular monolith implemented for experimental preview; recovery and API behavior need validation |
+| Database | SQLite schema and initial migration implemented; migration policy needs review before stable release |
+| Integration APIs | Seerr/Radarr/Sonarr/Prowlarr adapters implemented from API surfaces; live behavior not validated |
+| Dashboard | Authenticated React/TypeScript dashboard implemented for core queue controls |
+| Docker | Local multi-stage Compose build available; no GHCR publication |
 | CI/CD | To be implemented |
-| Public repository | To be created |
-| First release | Planned: 0.1.0 |
+| Public repository | Planned; publication not confirmed |
+| First release | Experimental target: 0.1.0; not released |
 
 ---
 

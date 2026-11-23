@@ -1,42 +1,31 @@
-# ==============================================================================
-# GXE-Search-Queue — multi-stage Rust build
-# ==============================================================================
-
-# ---- Builder stage -------------------------------------------------------
-FROM rust:1-slim-bookworm AS builder
-
+FROM node:22-alpine AS frontend
 WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci
+COPY tsconfig.json vite.config.ts ./
+COPY web/ ./web/
+RUN npm run build
 
-# Cache dependencies: copy manifests first, then vendor/build deps.
-COPY Cargo.toml Cargo.lock* ./
+FROM rust:1-slim-bookworm AS builder
+WORKDIR /app
+COPY Cargo.toml Cargo.lock ./
 COPY src/ ./src/
+COPY migrations/ ./migrations/
 COPY build.rs ./
+RUN cargo build --locked --release
 
-RUN cargo build --release
-
-# ---- Runtime stage -------------------------------------------------------
 FROM debian:bookworm-slim AS runtime
-
-# CA certificates for HTTPS and curl for healthchecks
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
-
 WORKDIR /app
-
-# Non-root user
-RUN groupadd -r gxe && useradd -r -g gxe gxe
-
-# Copy the compiled binary (adjust the path to match the crate name)
+RUN groupadd -r gxe && useradd -r -g gxe gxe && mkdir -p /app/data && chown -R gxe:gxe /app/data
 COPY --from=builder /app/target/release/gxe-search-queue /usr/local/bin/gxe-search-queue
-
-# Configuration directory (mount configs here if needed)
-COPY config/ ./config/
-
+COPY --from=frontend /app/web-dist /app/web
 USER gxe
-
-EXPOSE 8080 8081
-
-# Entry point can be overridden with, e.g., specific subcommands
+ENV DATABASE_PATH=/app/data/gxe-search-queue.sqlite3
+ENV RUST_LOG=info
+ENV API_BIND_ADDR=0.0.0.0
+ENV API_PORT=8080
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 CMD curl --fail http://127.0.0.1:8080/api/health || exit 1
 ENTRYPOINT ["gxe-search-queue"]
-CMD ["serve"]

@@ -1,69 +1,56 @@
-# Architecture Overview
+# Architecture and current status
 
-`gxe-search-queue` is an autonomous service that sits between **Seerr** (request manager) and the *Arr search chain (**Prowlarr** as indexer aggregator, **Radarr**/ **Sonarr** as content managers). It receives movie and series requests, queues them intelligently, and triggers searches under strict rate and deduplication constraints.
+GXE is a single Rust/Tokio/Axum application with a React/TypeScript dashboard
+and SQLite persistence. Its purpose is to coordinate requests with existing
+services; it does not manage media releases, downloads, or playback.
 
-> ⚠️ *The internal architecture is still in preliminary design (see [PROJECT_SPEC.md](PROJECT_SPEC.md)). This document describes the target architecture; the technology stack is not yet finalized.*
-
-## System diagram
-
-```
- +----------+  webhook   +-------------------------+   API    +-------------+
- |  Seerr   | ---------- |                         | -------- |  Prowlarr   |
- +----------+            |     gxe-search-queue    |          | (indexers)  |
-                         |                         |          +-------------+
-                         |  +-------+ +-----------+ |
-                         |  |queue  | |scheduler  | |
-                         |  +-------+ +-----------+ |          +-----------+
-                         |  +-------+ +-----------+ |          |  Radarr   |
-                         |  |retry  | |state mgmt | |          |  Sonarr   |
-                         |  +-------+ +-----------+ |          +-----------+
-                         |  +-------+ +-----------+ |
-                         |  | api   | |dashboard  | |
-                         |  +-------+ +-----------+ |
-                         |  +---------------------+ |
-                         |  | notifications       | |
-                         |  +---------------------+ |
-                         +-------------+-------------+
-                                         |
-                                         v
-                                  +-----------+
-                                  |  database |
-                                  +-----------+
+```text
+Seerr --periodic request sync--> GXE Search Queue
+                                  |-- SQLite (queue, run state, settings, history)
+                                  |-- authenticated dashboard/API
+                                  |-- Radarr (one movie search command)
+                                  |-- Sonarr (one episode search command)
+                                  `-- Prowlarr (health check only in this preview)
 ```
 
-## Components
+The application polls Seerr every minute, checks service health every 30
+seconds, and runs one scheduling worker. It begins globally paused. Search
+commands are serialized, and an active or ambiguous persisted run prevents a
+new GXE operation. Ambiguous results require administrator reconciliation; the
+application does not blindly repeat a command after a timeout or restart.
 
-Each component is isolated so it can be replaced or extended without rewriting the whole system (spec, section 3).
+## Scheduler
 
-- **Queue engine (`src/core`)** — the global search queue. Enforces:
-  - One global search at a time
-  - Minimum 10-minute interval between search runs
-  - Request deduplication
-  - Separate queues for movies and series
-- **Scheduler (`src/scheduler`)** — schedules queue execution windows and recurring maintenance jobs (cooldown expiry, state cleanup, history pruning).
-- **Retry management** — progressive (backoff) retries for failed requests, with per-request retry budgets.
-- **State management** — tracks request/job lifecycle; guarantees full state recovery after restarts (no in-memory-only state).
-- **Database (`src/database`)** — persistent store for requests, jobs, indexers, cooldowns, and history (90-day retention). Schema must support progressive migrations.
-- **Integrations (`src/integrations`)** — adapters for Seerr, Radarr, Sonarr, and Prowlarr. **API/webhook only**: the software never writes to the internal databases of integrated apps.
-- **Internal API (`src/api`)** — REST control plane for the dashboard and external tools (submit/query/cancel, status, indexer cooldown state).
-- **Dashboard (`src/dashboard`)** — authenticated administrative UI with 90-day history.
-- **Notifications (`src/notifications`)** — alerts for important events (job success/failure, cooldowns, queue overflow).
+An eligible operation is claimed transactionally in SQLite. The default
+minimum interval is 600 seconds from the preceding run start; it cannot be set
+below 600 seconds. A command still running past that interval continues to
+block the queue. When both categories have eligible items, the scheduler
+alternates after at most two consecutive searches of one category. Episode
+selection favors earlier episodes and rotates across series when possible.
 
-## Behavioral rules (from the approved functional spec)
+No-result searches use the approved escalating delays. Technical failures do
+not increment that content counter; because a technical retry policy has not
+been approved, the job is suspended for administrator action. An external
+command timeout is preserved as ambiguous instead of automatically retried.
 
-1. **One search at a time** — the global queue serializes searches.
-2. **10-minute minimum interval** — between the start of two searches.
-3. **Deduplication** — identical requests collapse into one queue entry.
-4. **Movie/series separation** — distinct pipelines, shared scheduling constraints.
-5. **Progressive retries** — exponential/stepped backoff until retry budget exhausted.
-6. **Indexer cooldowns** — per-indexer cooldown windows pause that indexer, not the whole queue.
-7. **Manual search detection** — user-initiated (e.g. from Radarr) searches are detected and handled separately from queued ones.
-8. **State recovery** — any restart resumes from persisted state; no lost jobs.
-9. **90-day history** — completed/failed entries are retained for 90 days, then pruned.
+## Integrations and limits
 
-## Security and independence
+Seerr request polling, Radarr/Sonarr command adapters, service health checks,
+and a preflight check for active searches are implemented from documented API
+surfaces. Live compatibility is still unverified. Seerr automatic search must
+be disabled by the administrator or it can bypass GXE.
 
-- No mandatory dependency on GXE Republic infrastructure (no hardcoded IPs/services).
-- Integration credentials stored securely (env/secrets); never logged.
-- Dashboard requires authentication.
-- No proprietary cloud services required to run.
+The Prowlarr adapter only checks service availability. It does not ingest 429
+events, respect `Retry-After`, apply indexer-specific cooldowns, or verify
+query fan-out. Therefore the 10-minute GXE interval is not a guarantee of
+per-indexer protection. Do not claim that protection until experimentally
+validated. No external service database is accessed or modified.
+
+## Persistence
+
+The initial migration includes requesters through Seerr request rows, queue
+jobs and request links, external search commands, service health, cooldown
+records, settings, and dashboard events. Transactions protect idempotent
+request/job insertion and scheduler claims. The database is mounted in the
+Compose named volume; completed history is pruned after 90 days while active
+operations and queue state are retained.

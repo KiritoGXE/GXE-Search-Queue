@@ -1,80 +1,57 @@
-# Installation Guide
+# Installation
 
-> ⚠️ *Official images are not yet published. This document describes the target installation methods; they will be available from the 0.1.0 release onward.*
+This preview is installed from the repository with Docker Compose. A GHCR
+image is planned but has not been published.
 
-## Prerequisites
+## Requirements
 
-- **Docker** and **Docker Compose** (recommended)
-- Running instances of at least one of: **Seerr**, **Radarr**, **Sonarr**, **Prowlarr**
-- Access to the APIs of the applications you want to integrate (API keys)
+- Docker Engine and the Docker Compose plugin.
+- A Docker network route to Seerr, Radarr, Sonarr, and Prowlarr.
+- API keys created in those services. Do not paste keys into chat or commit
+  them to source control.
 
-Supported platforms: **Linux AMD64** and **Linux ARM64**.
-
-## Option A: Official Docker image (recommended)
-
-Official images are published to GitHub Container Registry:
-
-```
-ghcr.io/kiritogxe/gxe-search-queue
-```
+## Start
 
 ```sh
-# Pull the latest tagged release
-docker pull ghcr.io/kiritogxe/gxe-search-queue:latest
-
-# Run with a persistent data volume
-docker run -d \
-  --name gxe-search-queue \
-  --restart unless-stopped \
-  -p 8080:8080 \
-  -v gxe-search-queue-data:/app/data \
-  ghcr.io/kiritogxe/gxe-search-queue:latest
+# From a checked-out copy of the project:
+cp .env.example .env
 ```
 
-Configure via environment variables (copy `.env.example` as a starting point):
+Edit `.env` with a unique random `GXE_ADMIN_TOKEN` (at least 32 characters),
+the service URLs reachable from the container, and their API keys. On a shared
+Docker network, use service DNS names. Keep `.env` private.
+
+Before enabling GXE, disable Seerr's automatic search on approval yourself;
+GXE does not change Seerr configuration. Review the documented rate-limiting
+limitations because serial searches do not prove per-indexer pacing.
 
 ```sh
-docker run -d \
-  --name gxe-search-queue \
-  --env-file ./gxe-search-queue.env \
-  -p 8080:8080 \
-  -v gxe-search-queue-data:/app/data \
-  ghcr.io/kiritogxe/gxe-search-queue:latest
+docker compose up -d --build
 ```
 
-Pinned versions are preferred for production (e.g. `:0.1.0` instead of `:latest`).
+Open `http://localhost:8080` (or the host and port configured in `GXE_PORT`)
+and sign in with the administrator token. The queue starts paused. Confirm the
+integration health shown on the dashboard, review the preview limitations,
+then resume it when you are ready.
 
-## Option B: Docker Compose (local development / evaluation)
+## Data, updates, backup, restore
 
-1. Clone the repository:
-   ```sh
-   git clone https://github.com/KiritoGXE/gxe-search-queue.git
-   cd gxe-search-queue
-   ```
-
-2. Copy the sample environment file and adjust:
-   ```sh
-   cp .env.example .env
-   ```
-
-3. Launch the stack:
-   ```sh
-   docker compose up -d
-   ```
-
-4. Verify:
-   - API: `http://localhost:8080`
-   - Dashboard: `http://localhost:8081`
-
-## Option C: Self-build from source
-
-Build and run the image directly from the repository (see [Development guide](development.md) for the toolchain):
+SQLite lives in the named `app-data` volume. Stop the service before making a
+file-level backup so the database and WAL are consistent:
 
 ```sh
-docker build -t gxe-search-queue:dev .
-docker run --rm gxe-search-queue:dev --help
+docker compose stop app
+docker run --rm -v gxe-search-queue_app-data:/data -v "$PWD":/backup alpine \
+  tar -czf /backup/gxe-search-queue-data.tgz -C /data .
+docker compose start app
 ```
 
-## Configuration reference
+Restore by stopping the app, extracting the archive into the same volume, and
+starting the app. Back up `.env` separately in a protected location. For an
+update, fetch the intended source revision, inspect its changelog and migration
+notes, then run `docker compose up -d --build`. Preserve a backup before
+updating; SQLite migrations run automatically at startup.
 
-See [configuration.md](configuration.md) for the full list of environment variables and configuration options.
+Do not expose this preview directly to the public internet. Its single-token
+authentication is intended for a trusted local network. Use a TLS reverse
+proxy if accessing it remotely.

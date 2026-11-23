@@ -1,43 +1,36 @@
-# Development Guide
+# Development
 
-## Workflow
+The project uses Rust/Tokio/Axum, SQLx/SQLite, and React/TypeScript. Docker
+Compose builds the dashboard and backend into one self-hosted application.
 
-1. Setup development dependencies:
-   ```sh
-   cp .env.example .env
-   docker compose up -d postgres redis
-   ```
+## Build
 
-2. Run the application locally:
-   ```sh
-   cargo run
-   ```
+```sh
+docker build -t gxe-search-queue:dev .
+```
 
-3. Run tests:
-   ```sh
-   # All tests
-   cargo test
+To build the dashboard separately, use Node 22 with `npm ci` and `npm run
+build`. The Rust service uses Cargo with the committed `Cargo.lock`.
 
-   # Specific integration tests
-   cargo test --test integration
-   ```
+## Current implementation
 
-4. Code formatting and linting:
-   ```sh
-   cargo fmt
-   cargo clippy -- -D warnings
-   ```
+- SQLite migrations and persistent requests, shared jobs, runs, history,
+  settings, health, and cooldown records.
+- Authenticated Axum API and React dashboard.
+- Seerr polling synchronization and Radarr/Sonarr request/queue/search adapters.
+- One-job scheduler worker with interval and fairness policy, service-health
+  checks, startup pause, and manual handling for ambiguous external commands.
+- Multi-stage Docker build and Compose configuration.
 
-## Folder Structure Guidelines
+The installed service APIs and command details are not validated against live
+instances. Per-indexer 429 handling and cooldown ingestion are not implemented.
+Read the [integration validation record](integrations/README.md) before
+connecting an instance. Never add secrets to source control or logs.
 
-- Place queue primitives, state machines, and task models in `src/core/`.
-- Place scheduling mechanisms in `src/scheduler/`.
-- Add connectors or third-party web crawlers into `src/integrations/`.
-- Add database models, queries, and migrations under `src/database/`.
-- REST API route handlers belong in `src/api/`.
-- Web UI assets / handlers belong in `src/dashboard/`.
-- Webhooks and email sending mechanisms live in `src/notifications/`.
+## Validation work before v0.1.0
 
-## Fixtures & Test Data
-
-Store reusable JSON or SQL payloads in `tests/fixtures/`.
+Validate request modification/cancellation, Seerr automatic search, command
+payloads and lifecycle, manual operation detection, import and season-pack
+state, HTTP 429 / `Retry-After`, concurrent request fan-out, and restart during
+an external operation. Add tests alongside each validated scheduler behavior;
+the existing legacy tests do not establish these guarantees.

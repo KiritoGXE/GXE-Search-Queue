@@ -1,36 +1,37 @@
-# Configuration Reference
+# Configuration
 
-`gxe-search-queue` reads configuration from environment variables or file-based configuration in `config/`.
+Set secrets through the environment or a protected `.env` file. Never commit
+service API keys or the dashboard token.
 
-## Environment Variables
-
-| Variable | Default | Description |
+| Variable | Default | Purpose |
 |---|---|---|
-| `LOG_LEVEL` | `info` | Log level (`trace`, `debug`, `info`, `warn`, `error`). |
-| `API_BIND_ADDR` | `0.0.0.0` | IP address for the REST API server. |
-| `API_PORT` | `8080` | Port for the REST API server. |
-| `DASHBOARD_BIND_ADDR` | `0.0.0.0` | IP address for the dashboard interface. |
-| `DASHBOARD_PORT` | `8081` | Port for the dashboard interface. |
-| `DATABASE_URL` | — | Postgres connection string (`postgres://user:pass@host:port/db`). |
-| `DATABASE_POOL_MAX` | `10` | Maximum connections in the Postgres pool. |
-| `REDIS_URL` | — | Redis connection string (`redis://host:port`). |
-| `SCHEDULER_TIMEZONE` | `UTC` | Timezone evaluated for scheduled cron jobs. |
+| `GXE_ADMIN_TOKEN` | Required | Dashboard/API bearer token; minimum 32 characters. |
+| `GXE_PORT` | `8080` | Host port published by Compose. |
+| `DATABASE_PATH` | `/app/data/gxe-search-queue.sqlite3` in Docker | Persistent SQLite database. |
+| `RUST_LOG` | `info` | Rust tracing filter. |
+| `SEERR_URL` | Unset | Seerr API URL; required for request synchronization. |
+| `SEERR_API_KEY` | Empty | Required Seerr API key for the request API; the public status endpoint alone cannot validate request access. |
+| `RADARR_URL`, `RADARR_API_KEY` | Unset | Radarr API connection. |
+| `SONARR_URL`, `SONARR_API_KEY` | Unset | Sonarr API connection. |
+| `PROWLARR_URL`, `PROWLARR_API_KEY` | Unset | Prowlarr availability check. |
 
-## File Configuration
+All URLs must be reachable from the app container. With Docker Compose, use
+service names on a shared network, not `localhost` unless the service runs in
+the same container.
 
-Runtime default settings live under `config/default.toml` (or `.json`, `.yaml`). Values provided through environment variables take precedence over file-based values.
+## Dashboard settings
 
-Example `config/default.toml`:
+| Setting | Default | Constraint |
+|---|---:|---|
+| Minimum interval | 600 seconds | Cannot be lower than 600 seconds. |
+| Queue capacity | 0 (unlimited) | Zero means unlimited; otherwise positive. |
+| Search timeout | 900 seconds | Positive; ambiguous runs require reconciliation. |
+| Theatrical release delay | 0 days | Configurable; the previously discussed 30 days is not approved. |
 
-```toml
-[server]
-api_port = 8080
-dashboard_port = 8081
+The scheduler starts globally paused on a fresh database. Seerr synchronization
+runs every 60 seconds and service health checks run every 30 seconds. Those
+intervals are currently implementation defaults, not dashboard settings.
 
-[queue]
-default_lease_duration_secs = 60
-max_retries = 3
-
-[database]
-max_connections = 10
-```
+The dashboard token is stored in the browser's session storage and sent as a
+Bearer token. It is not an account system and does not provide TLS; keep the
+service on a trusted network or put it behind a TLS reverse proxy.

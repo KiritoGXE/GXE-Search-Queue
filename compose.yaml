@@ -1,57 +1,25 @@
-# ==============================================================================
-# GXE-Search-Queue — local development stack
-# Usage: docker compose up -d
-# ==============================================================================
-
 services:
   app:
     build:
       context: .
-      dockerfile: Dockerfile
-    env_file:
-      - .env
-    environment:
-      DATABASE_URL: postgres://gxe:gxe@postgres:5432/gxe_search_queue
-      REDIS_URL: redis://redis:6379
-    ports:
-      - "8080:8080"   # REST API
-      - "8081:8081"   # Dashboard
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
+    image: ghcr.io/kiritogxe/gxe-search-queue:0.1.0-pre
     restart: unless-stopped
-
-  postgres:
-    image: postgres:16-alpine
+    ports:
+      - "${GXE_PORT:-8080}:8080"
     environment:
-      POSTGRES_USER: gxe
-      POSTGRES_PASSWORD: gxe
-      POSTGRES_DB: gxe_search_queue
+      DATABASE_PATH: /app/data/gxe-search-queue.sqlite3
+      RUST_LOG: ${RUST_LOG:-info}
+      GXE_ADMIN_TOKEN: ${GXE_ADMIN_TOKEN:?Set GXE_ADMIN_TOKEN in .env}
+      SEERR_URL: ${SEERR_URL:-}
+      SEERR_API_KEY: ${SEERR_API_KEY:-}
+      RADARR_URL: ${RADARR_URL:-}
+      RADARR_API_KEY: ${RADARR_API_KEY:-}
+      SONARR_URL: ${SONARR_URL:-}
+      SONARR_API_KEY: ${SONARR_API_KEY:-}
+      PROWLARR_URL: ${PROWLARR_URL:-}
+      PROWLARR_API_KEY: ${PROWLARR_API_KEY:-}
     volumes:
-      - pgdata:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U gxe -d gxe_search_queue"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-
-  redis:
-    image: redis:7-alpine
-    command: ["redis-server", "--appendonly", "yes"]
-    volumes:
-      - redisdata:/data
-    ports:
-      - "6379:6379"
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
+      - app-data:/app/data
 
 volumes:
-  pgdata:
-  redisdata:
+  app-data:

@@ -38,7 +38,7 @@ This project follows the [Code of Conduct](CODE_OF_CONDUCT.md). All participants
 Use conventional commit style:
 
 ```
-feat(queue): add retry with exponential backoff
+feat(queue): add approved retry scheduling
 fix(scheduler): respect timezone for cron jobs
 docs(architecture): describe delivery semantics
 ```
@@ -46,4 +46,4 @@ docs(architecture): describe delivery semantics
 ## Licensing
 
 By contributing you agree that your contributions are licensed under the same
-[MIT License](LICENSE) as this project.
+[Apache License 2.0](LICENSE) as this project.
