@@ -156,23 +156,31 @@ async fn queue(State(state): State<ApiState>) -> Result<Json<Value>, ApiError> {
     Ok(Json(json!({"items": jobs})))
 }
 
+#[derive(sqlx::FromRow)]
+struct HistoryRecord {
+    id: String,
+    job_id: String,
+    state: String,
+    started_at: i64,
+    completed_at: Option<i64>,
+    outcome_detail: Option<String>,
+}
+
 async fn history(State(state): State<ApiState>) -> Result<Json<Value>, ApiError> {
-    let rows: Vec<(String, String, String, i64, Option<i64>, Option<String>)> = sqlx::query_as(
+    let rows: Vec<HistoryRecord> = sqlx::query_as(
         "SELECT id, job_id, state, started_at, completed_at, outcome_detail FROM search_runs ORDER BY started_at DESC LIMIT 500",
     )
     .fetch_all(state.database.pool())
     .await
     .map_err(DatabaseError::from)?;
-    Ok(Json(
-        json!({"items": rows.into_iter().map(|(id, job_id, state, started_at, completed_at, detail)| json!({
-        "id": id,
-        "job_id": job_id,
-        "state": state,
-        "started_at": started_at,
-        "completed_at": completed_at,
-        "detail": detail,
-    })).collect::<Vec<_>>()}),
-    ))
+    Ok(Json(json!({"items": rows.into_iter().map(|run| json!({
+        "id": run.id,
+        "job_id": run.job_id,
+        "state": run.state,
+        "started_at": run.started_at,
+        "completed_at": run.completed_at,
+        "detail": run.outcome_detail,
+    })).collect::<Vec<_>>()})))
 }
 
 async fn cooldowns(State(state): State<ApiState>) -> Result<Json<Value>, ApiError> {

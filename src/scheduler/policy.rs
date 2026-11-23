@@ -50,7 +50,7 @@ impl SchedulerPolicy {
 
         let candidates: Vec<&QueueJob> = jobs
             .iter()
-            .filter(|job| forced_type.map_or(true, |kind| job.media_type == kind))
+            .filter(|job| forced_type.is_none_or(|kind| job.media_type == kind))
             .filter(|job| {
                 if job.media_type != MediaType::Episode {
                     return true;
