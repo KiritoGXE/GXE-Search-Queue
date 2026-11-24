@@ -35,8 +35,9 @@ The app container does not install or modify the media services. See
 - Movie and monitored, aired episode jobs sourced from Radarr and Sonarr.
 - One GXE-managed search at a time, 10-minute minimum start interval, category
   fairness, episode ordering, no-result retry delays, and manual priority.
-- Search command polling, download/library checks, and manual reconciliation
-  when an external command's outcome is ambiguous.
+- Search command polling, download/library checks, and restart reconciliation
+  for persisted manager command IDs. Unknown outcomes remain blocked for manual
+  reconciliation; GXE never blindly resubmits an uncertain command.
 - Persistent dashboard alerts for technical search failures and uncertain
   external outcomes, plus service outage/restoration transitions. Repeated
   active alerts are grouped until acknowledged.

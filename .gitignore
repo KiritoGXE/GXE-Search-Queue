@@ -21,3 +21,12 @@ logs/
 
 # Local configuration overrides
 config/local/
+
+# Frontend dependencies and build output
+node_modules/
+web-dist/
+test-results/
+playwright-report/
+
+# TypeScript build cache
+*.tsbuildinfo

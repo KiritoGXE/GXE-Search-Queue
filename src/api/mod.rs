@@ -19,12 +19,14 @@ use tower_http::{
 use crate::{
     core::SearchRun,
     database::{Database, DatabaseError},
+    integrations::{IndexerOverview, Integrations},
     scheduler::SearchOutcome,
 };
 
 #[derive(Clone)]
 struct ApiState {
     database: Database,
+    integrations: Integrations,
 }
 
 #[derive(Debug)]
@@ -49,8 +51,16 @@ impl IntoResponse for ApiError {
     }
 }
 
-pub fn router(database: Database, admin_token: String, web_dist: PathBuf) -> Router {
-    let state = ApiState { database };
+pub fn router(
+    database: Database,
+    admin_token: String,
+    web_dist: PathBuf,
+    integrations: Integrations,
+) -> Router {
+    let state = ApiState {
+        database,
+        integrations,
+    };
     let protected = Router::new()
         .route("/status", get(status))
         .route("/queue", get(queue))
@@ -58,6 +68,8 @@ pub fn router(database: Database, admin_token: String, web_dist: PathBuf) -> Rou
         .route("/events", get(events))
         .route("/events/:id/ack", post(acknowledge_event))
         .route("/cooldowns", get(cooldowns))
+        .route("/indexers", get(indexers))
+        .route("/queue/:id/details", get(queue_job_details))
         .route("/settings", get(settings).put(update_settings))
         .route("/queue/pause", post(set_pause))
         .route("/queue/empty", post(empty_queue))
@@ -121,7 +133,16 @@ async fn require_admin_token(
 
 async fn status(State(state): State<ApiState>) -> Result<Json<Value>, ApiError> {
     let counts = state.database.queue_counts().await?;
-    let active = state.database.active_searches().await?;
+    let active: Option<(String, String, String, i64, String, String)> = sqlx::query_as(
+        "SELECT search_runs.id, search_runs.job_id, search_runs.state, search_runs.started_at, \
+                queue_jobs.title, queue_jobs.media_type \
+         FROM search_runs JOIN queue_jobs ON queue_jobs.id=search_runs.job_id \
+         WHERE search_runs.state IN ('submitting','active','reconciling') \
+         ORDER BY search_runs.started_at LIMIT 1",
+    )
+    .fetch_optional(state.database.pool())
+    .await
+    .map_err(DatabaseError::from)?;
     let paused = state
         .database
         .setting_value("global_paused")
@@ -139,10 +160,34 @@ async fn status(State(state): State<ApiState>) -> Result<Json<Value>, ApiError> 
             .fetch_one(state.database.pool())
             .await
             .map_err(DatabaseError::from)?;
+    let period_start = unix_now().saturating_sub(90 * 24 * 60 * 60);
+    let outcomes: (i64, i64, i64) = sqlx::query_as(
+        "SELECT \
+            COALESCE(SUM(CASE WHEN state='completed' THEN 1 ELSE 0 END), 0), \
+            COALESCE(SUM(CASE WHEN state='no_results' THEN 1 ELSE 0 END), 0), \
+            COALESCE(SUM(CASE WHEN state='technical_error' THEN 1 ELSE 0 END), 0) \
+         FROM search_runs WHERE completed_at >= ?",
+    )
+    .bind(period_start)
+    .fetch_one(state.database.pool())
+    .await
+    .map_err(DatabaseError::from)?;
     Ok(Json(json!({
         "paused": paused,
         "counts": counts,
-        "active_search": active.first(),
+        "outcomes_90d": {
+            "completed": outcomes.0,
+            "no_results": outcomes.1,
+            "technical_errors": outcomes.2,
+        },
+        "active_search": active.map(|(id, job_id, state, started_at, title, media_type)| json!({
+            "id": id,
+            "job_id": job_id,
+            "state": state,
+            "started_at": started_at,
+            "title": title,
+            "media_type": media_type,
+        })),
         "services": health.into_iter().map(|(service, available, checked_at, detail)| json!({
             "service": service,
             "available": available != 0,
@@ -158,6 +203,74 @@ async fn queue(State(state): State<ApiState>) -> Result<Json<Value>, ApiError> {
     Ok(Json(json!({"items": jobs})))
 }
 
+async fn indexers(
+    State(state): State<ApiState>,
+) -> Result<Json<IndexerOverview>, (StatusCode, Json<Value>)> {
+    match state.integrations.indexer_overview().await {
+        Ok(overview) => Ok(Json(overview)),
+        Err(error) => {
+            tracing::warn!(%error, "Could not read Prowlarr indexer overview");
+            Err((
+                StatusCode::BAD_GATEWAY,
+                Json(json!({"error": "Prowlarr indexer data is temporarily unavailable"})),
+            ))
+        }
+    }
+}
+
+async fn queue_job_details(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let Some(job) = state.database.queue_job(&id).await? else {
+        return Err(ApiError(DatabaseError::InvalidData(
+            "queue item was not found".into(),
+        )));
+    };
+    let requests: Vec<(String, String, String, i64)> = sqlx::query_as(
+        "SELECT requests.external_id, requests.requester_name, requests.media_type, requests.created_at \
+         FROM request_jobs JOIN requests ON requests.id=request_jobs.request_id \
+         WHERE request_jobs.job_id=? AND requests.active=1 ORDER BY requests.created_at",
+    )
+    .bind(&id)
+    .fetch_all(state.database.pool())
+    .await
+    .map_err(DatabaseError::from)?;
+    let runs: Vec<JobRunRecord> = sqlx::query_as(
+        "SELECT id, state, started_at, completed_at, outcome_detail \
+         FROM search_runs WHERE job_id=? ORDER BY started_at DESC LIMIT 50",
+    )
+    .bind(&id)
+    .fetch_all(state.database.pool())
+    .await
+    .map_err(DatabaseError::from)?;
+    Ok(Json(json!({
+        "job": job,
+        "requests": requests.into_iter().map(|(external_id, requester_name, media_type, created_at)| json!({
+            "external_id": external_id,
+            "requester_name": requester_name,
+            "media_type": media_type,
+            "created_at": created_at,
+        })).collect::<Vec<_>>(),
+        "runs": runs.into_iter().map(|run| json!({
+            "id": run.id,
+            "state": run.state,
+            "started_at": run.started_at,
+            "completed_at": run.completed_at,
+            "detail": run.outcome_detail,
+        })).collect::<Vec<_>>(),
+    })))
+}
+
+#[derive(sqlx::FromRow)]
+struct JobRunRecord {
+    id: String,
+    state: String,
+    started_at: i64,
+    completed_at: Option<i64>,
+    outcome_detail: Option<String>,
+}
+
 #[derive(sqlx::FromRow)]
 struct HistoryRecord {
     id: String,
@@ -166,11 +279,16 @@ struct HistoryRecord {
     started_at: i64,
     completed_at: Option<i64>,
     outcome_detail: Option<String>,
+    title: Option<String>,
+    media_type: Option<String>,
 }
 
 async fn history(State(state): State<ApiState>) -> Result<Json<Value>, ApiError> {
     let rows: Vec<HistoryRecord> = sqlx::query_as(
-        "SELECT id, job_id, state, started_at, completed_at, outcome_detail FROM search_runs ORDER BY started_at DESC LIMIT 500",
+        "SELECT search_runs.id, search_runs.job_id, search_runs.state, search_runs.started_at, \
+                search_runs.completed_at, search_runs.outcome_detail, queue_jobs.title, queue_jobs.media_type \
+         FROM search_runs LEFT JOIN queue_jobs ON queue_jobs.id=search_runs.job_id \
+         ORDER BY search_runs.started_at DESC LIMIT 500",
     )
     .fetch_all(state.database.pool())
     .await
@@ -182,6 +300,8 @@ async fn history(State(state): State<ApiState>) -> Result<Json<Value>, ApiError>
         "started_at": run.started_at,
         "completed_at": run.completed_at,
         "detail": run.outcome_detail,
+        "title": run.title,
+        "media_type": run.media_type,
     })).collect::<Vec<_>>()})))
 }
 
@@ -269,35 +389,43 @@ async fn update_settings(
     State(state): State<ApiState>,
     Json(input): Json<SettingsInput>,
 ) -> Result<Json<Value>, ApiError> {
+    if input.minimum_interval_seconds < 600
+        || input.queue_capacity < 0
+        || input.search_timeout_seconds <= 0
+        || input.movie_theatrical_delay_days < 0
+    {
+        return Err(ApiError(DatabaseError::InvalidData(
+            "settings are outside the supported range".into(),
+        )));
+    }
     let now = unix_now();
-    state
+    let mut transaction = state
         .database
-        .set_setting(
-            "minimum_interval_seconds",
-            &input.minimum_interval_seconds.to_string(),
-            now,
-        )
-        .await?;
-    state
-        .database
-        .set_setting("queue_capacity", &input.queue_capacity.to_string(), now)
-        .await?;
-    state
-        .database
-        .set_setting(
-            "search_timeout_seconds",
-            &input.search_timeout_seconds.to_string(),
-            now,
-        )
-        .await?;
-    state
-        .database
-        .set_setting(
+        .pool()
+        .begin()
+        .await
+        .map_err(DatabaseError::from)?;
+    for (key, value) in [
+        ("minimum_interval_seconds", input.minimum_interval_seconds),
+        ("queue_capacity", input.queue_capacity),
+        ("search_timeout_seconds", input.search_timeout_seconds),
+        (
             "movie_theatrical_delay_days",
-            &input.movie_theatrical_delay_days.to_string(),
-            now,
+            input.movie_theatrical_delay_days,
+        ),
+    ] {
+        sqlx::query(
+            "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?) \
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
         )
-        .await?;
+        .bind(key)
+        .bind(value.to_string())
+        .bind(now)
+        .execute(&mut *transaction)
+        .await
+        .map_err(DatabaseError::from)?;
+    }
+    transaction.commit().await.map_err(DatabaseError::from)?;
     Ok(Json(json!({"saved": true})))
 }
 

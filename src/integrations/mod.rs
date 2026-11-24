@@ -2,6 +2,7 @@ use std::{env, time::Duration};
 
 use chrono::{DateTime, NaiveDate, Utc};
 use reqwest::{Client, StatusCode};
+use serde::Serialize;
 use serde_json::{json, Value};
 use thiserror::Error;
 use uuid::Uuid;
@@ -25,6 +26,28 @@ pub struct Integrations {
     radarr: Option<Service>,
     sonarr: Option<Service>,
     prowlarr: Option<Service>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct IndexerSummary {
+    pub id: i64,
+    pub name: String,
+    pub enabled: bool,
+    pub protocol: Option<String>,
+    pub privacy: Option<String>,
+    pub disabled_until: Option<String>,
+    pub most_recent_failure: Option<String>,
+    pub queries_24h: i64,
+    pub grabs_24h: i64,
+    pub failed_queries_24h: i64,
+    pub average_response_time_ms_24h: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct IndexerOverview {
+    pub checked_at: i64,
+    pub period_started_at: i64,
+    pub indexers: Vec<IndexerSummary>,
 }
 
 #[derive(Debug, Error)]
@@ -611,6 +634,88 @@ impl Integrations {
         Ok(SearchOutcome::NoResults)
     }
 
+    /// Reconcile persisted GXE commands after a restart or an ambiguous API
+    /// timeout. This only reads manager state; it never submits another search.
+    pub async fn reconcile_active_searches(
+        &self,
+        database: &Database,
+    ) -> Result<(), IntegrationError> {
+        let runs: Vec<(String, Option<String>, String, Option<i64>)> = sqlx::query_as(
+            "SELECT search_runs.id, search_runs.command_id, queue_jobs.media_type, \
+                    queue_jobs.external_manager_id \
+             FROM search_runs JOIN queue_jobs ON queue_jobs.id=search_runs.job_id \
+             WHERE search_runs.state IN ('submitting', 'active', 'reconciling') \
+             ORDER BY search_runs.started_at",
+        )
+        .fetch_all(database.pool())
+        .await
+        .map_err(DatabaseError::from)?;
+
+        for (run_id, command_id, media_type, manager_id) in runs {
+            let Some(command_id) = command_id else {
+                // The process may have stopped after Radarr/Sonarr accepted the
+                // POST but before GXE persisted its command id. Keep it blocked.
+                database.mark_search_ambiguous(&run_id).await?;
+                continue;
+            };
+            let (media_type, service, service_name) = match media_type.as_str() {
+                "movie" => (MediaType::Movie, self.radarr.as_ref(), "Radarr"),
+                "episode" => (MediaType::Episode, self.sonarr.as_ref(), "Sonarr"),
+                _ => continue,
+            };
+            let (Some(service), Some(manager_id)) = (service, manager_id) else {
+                continue;
+            };
+            let route = format!("api/v3/command/{command_id}");
+            let command: Value = self.get_json(service, service_name, &route, &[]).await?;
+            let status = command
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+
+            if matches!(status, "queued" | "started" | "inProgress" | "running") {
+                continue;
+            }
+            if status == "completed" {
+                let mut found = false;
+                for attempt in 0..=15 {
+                    if self.is_satisfied(media_type, manager_id).await? {
+                        found = true;
+                        break;
+                    }
+                    if attempt < 15 {
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                    }
+                }
+                let outcome = if found {
+                    SearchOutcome::Found
+                } else {
+                    SearchOutcome::NoResults
+                };
+                let detail = if found {
+                    "Recovered completed manager command; matching media is in the queue or library"
+                } else {
+                    "Recovered completed manager command; no matching queue or library item appeared during reconciliation"
+                };
+                database
+                    .finish_search(&run_id, outcome, Utc::now().timestamp(), Some(detail))
+                    .await?;
+            } else if matches!(status, "failed" | "aborted" | "cancelled") {
+                let detail = format!("Recovered manager command ended with status {status}");
+                database
+                    .finish_search(
+                        &run_id,
+                        SearchOutcome::TechnicalError,
+                        Utc::now().timestamp(),
+                        Some(&detail),
+                    )
+                    .await?;
+            }
+            // Unknown statuses remain active for safe manual reconciliation.
+        }
+        Ok(())
+    }
+
     pub async fn is_satisfied(
         &self,
         media_type: MediaType,
@@ -648,6 +753,30 @@ impl Integrations {
                     == Some(true))
             }
         }
+    }
+
+    /// Read Prowlarr's configured indexers, per-indexer status, and statistics
+    /// for the preceding 24 hours. The response is deliberately normalized so
+    /// credentials or provider configuration fields can never reach the UI.
+    pub async fn indexer_overview(&self) -> Result<IndexerOverview, IntegrationError> {
+        let service = self
+            .prowlarr
+            .as_ref()
+            .ok_or(IntegrationError::NotConfigured("Prowlarr"))?;
+        let now = Utc::now();
+        let period_start = now - chrono::Duration::hours(24);
+        let start_date = period_start.to_rfc3339();
+        let end_date = now.to_rfc3339();
+        let stats_params = [
+            ("startDate", start_date.as_str()),
+            ("endDate", end_date.as_str()),
+        ];
+        let (indexers, statuses, statistics) = tokio::try_join!(
+            self.get_json::<Value>(service, "Prowlarr", "api/v1/indexer", &[]),
+            self.get_json::<Value>(service, "Prowlarr", "api/v1/indexerstatus", &[]),
+            self.get_json::<Value>(service, "Prowlarr", "api/v1/indexerstats", &stats_params,),
+        )?;
+        map_indexer_overview(indexers, statuses, statistics, now.timestamp())
     }
 
     async fn sonarr_episodes_for_search(&self, episode_id: i64) -> Result<Value, IntegrationError> {
@@ -1015,4 +1144,287 @@ fn air_date_passed(episode: &Value, now: i64) -> bool {
         .and_then(Value::as_str)
         .and_then(parse_date)
         .is_some_and(|date| date.timestamp() <= now)
+}
+
+fn map_indexer_overview(
+    indexers: Value,
+    statuses: Value,
+    statistics: Value,
+    checked_at: i64,
+) -> Result<IndexerOverview, IntegrationError> {
+    let indexers = indexers.as_array().ok_or_else(|| {
+        IntegrationError::InvalidResponse("Prowlarr", "indexer response was not an array".into())
+    })?;
+    let statuses = statuses.as_array().ok_or_else(|| {
+        IntegrationError::InvalidResponse(
+            "Prowlarr",
+            "indexer status response was not an array".into(),
+        )
+    })?;
+    let statistics = statistics
+        .get("indexers")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    let status_by_id: std::collections::HashMap<i64, &Value> = statuses
+        .iter()
+        .filter_map(|row| Some((row.get("indexerId")?.as_i64()?, row)))
+        .collect();
+    let stats_by_id: std::collections::HashMap<i64, Value> = statistics
+        .into_iter()
+        .filter_map(|row| Some((row.get("indexerId")?.as_i64()?, row)))
+        .collect();
+
+    let mut summaries = Vec::with_capacity(indexers.len());
+    for indexer in indexers {
+        let id = indexer.get("id").and_then(Value::as_i64).ok_or_else(|| {
+            IntegrationError::InvalidResponse(
+                "Prowlarr",
+                "indexer record did not include an integer id".into(),
+            )
+        })?;
+        let status = status_by_id.get(&id).copied();
+        let statistics = stats_by_id.get(&id);
+        let integer = |key: &str| {
+            statistics
+                .and_then(|row| row.get(key))
+                .and_then(Value::as_i64)
+                .unwrap_or(0)
+        };
+        summaries.push(IndexerSummary {
+            id,
+            name: indexer
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("Indexer {id}")),
+            enabled: indexer
+                .get("enable")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            protocol: indexer
+                .get("protocol")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            privacy: indexer
+                .get("privacy")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            disabled_until: status
+                .and_then(|row| row.get("disabledTill"))
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            most_recent_failure: status
+                .and_then(|row| row.get("mostRecentFailure"))
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            queries_24h: integer("numberOfQueries"),
+            grabs_24h: integer("numberOfGrabs"),
+            failed_queries_24h: integer("numberOfFailedQueries"),
+            average_response_time_ms_24h: integer("averageResponseTime"),
+        });
+    }
+
+    Ok(IndexerOverview {
+        checked_at,
+        period_started_at: checked_at.saturating_sub(24 * 60 * 60),
+        indexers: summaries,
+    })
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use axum::{routing::get, Json, Router};
+    use serde_json::{json, Value};
+
+    use super::{map_indexer_overview, Integrations, Service};
+    use crate::database::Database;
+
+    async fn database_with_active_run(command_id: Option<&str>) -> Database {
+        let database = Database::connect(":memory:").await.unwrap();
+        database.migrate().await.unwrap();
+        sqlx::query(
+            "INSERT INTO queue_jobs (id, media_type, media_key, title, external_manager_id, state, first_requested_at, created_at, updated_at) \
+             VALUES ('job-1', 'movie', 'tmdb:1', 'Test movie', 11, 'running', 1, 1, 1)",
+        )
+        .execute(database.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO search_runs (id, job_id, command_id, state, started_at) \
+             VALUES ('run-1', 'job-1', ?, 'active', 1)",
+        )
+        .bind(command_id)
+        .execute(database.pool())
+        .await
+        .unwrap();
+        database
+    }
+
+    #[tokio::test]
+    async fn completed_command_with_downloaded_movie_is_reconciled() {
+        async fn completed_command() -> Json<Value> {
+            Json(json!({"id":77,"status":"completed"}))
+        }
+        async fn empty_queue() -> Json<Value> {
+            Json(json!({"records":[]}))
+        }
+        async fn downloaded_movie() -> Json<Value> {
+            Json(json!([{"id":11,"downloaded":true}]))
+        }
+
+        let app = Router::new()
+            .route("/api/v3/command/77", get(completed_command))
+            .route("/api/v3/queue", get(empty_queue))
+            .route("/api/v3/movie", get(downloaded_movie));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let database = database_with_active_run(Some("77")).await;
+        let integrations = Integrations {
+            http: reqwest::Client::new(),
+            seerr: None,
+            radarr: Some(Service {
+                base_url: format!("http://{address}/"),
+                api_key: "test-key".into(),
+            }),
+            sonarr: None,
+            prowlarr: None,
+        };
+
+        integrations
+            .reconcile_active_searches(&database)
+            .await
+            .unwrap();
+        let active: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM search_runs WHERE state IN ('submitting','active','reconciling')",
+        )
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        let job_state: (String,) = sqlx::query_as("SELECT state FROM queue_jobs WHERE id='job-1'")
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
+
+        assert_eq!(active.0, 0);
+        assert_eq!(job_state.0, "completed");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn running_command_remains_active_during_reconciliation() {
+        async fn active_command() -> Json<Value> {
+            Json(json!({"id":77,"status":"started"}))
+        }
+
+        let app = Router::new().route("/api/v3/command/77", get(active_command));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let database = database_with_active_run(Some("77")).await;
+        let integrations = Integrations {
+            http: reqwest::Client::new(),
+            seerr: None,
+            radarr: Some(Service {
+                base_url: format!("http://{address}/"),
+                api_key: "test-key".into(),
+            }),
+            sonarr: None,
+            prowlarr: None,
+        };
+
+        integrations
+            .reconcile_active_searches(&database)
+            .await
+            .unwrap();
+        let state: (String,) = sqlx::query_as("SELECT state FROM search_runs WHERE id='run-1'")
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
+        assert_eq!(state.0, "active");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn missing_command_id_stays_blocked_for_manual_reconciliation() {
+        let database = database_with_active_run(None).await;
+        let integrations = Integrations {
+            http: reqwest::Client::new(),
+            seerr: None,
+            radarr: None,
+            sonarr: None,
+            prowlarr: None,
+        };
+
+        integrations
+            .reconcile_active_searches(&database)
+            .await
+            .unwrap();
+        let state: (String,) = sqlx::query_as("SELECT state FROM search_runs WHERE id='run-1'")
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
+        assert_eq!(state.0, "reconciling");
+    }
+
+    #[test]
+    fn indexer_overview_whitelists_safe_fields_and_joins_by_id() {
+        let overview = map_indexer_overview(
+            json!([{
+                "id": 7,
+                "name": "Example Indexer",
+                "enable": true,
+                "protocol": "torrent",
+                "privacy": "public",
+                "fields": [{"name":"apikey", "value":"must-not-escape"}],
+                "baseUrl": "http://private-indexer.invalid"
+            }]),
+            json!([{
+                "indexerId": 7,
+                "disabledTill": "2026-11-24T12:00:00Z",
+                "mostRecentFailure": "2026-11-24T10:00:00Z"
+            }]),
+            json!({"indexers": [{
+                "indexerId": 7,
+                "numberOfQueries": 12,
+                "numberOfGrabs": 2,
+                "numberOfFailedQueries": 3,
+                "averageResponseTime": 450
+            }]}),
+            1_795_500_000,
+        )
+        .unwrap();
+
+        let indexer = &overview.indexers[0];
+        assert_eq!(indexer.id, 7);
+        assert_eq!(indexer.name, "Example Indexer");
+        assert!(indexer.enabled);
+        assert_eq!(
+            indexer.disabled_until.as_deref(),
+            Some("2026-11-24T12:00:00Z")
+        );
+        assert_eq!(indexer.queries_24h, 12);
+        assert_eq!(indexer.grabs_24h, 2);
+        assert_eq!(indexer.failed_queries_24h, 3);
+        assert_eq!(indexer.average_response_time_ms_24h, 450);
+
+        let serialized = serde_json::to_string(&overview).unwrap();
+        assert!(!serialized.contains("must-not-escape"));
+        assert!(!serialized.contains("private-indexer.invalid"));
+    }
+
+    #[test]
+    fn indexer_overview_rejects_an_unexpected_list_shape() {
+        let result =
+            map_indexer_overview(json!({"items": []}), json!([]), json!({"indexers": []}), 0);
+        assert!(result.is_err());
+    }
 }

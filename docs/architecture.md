@@ -10,14 +10,17 @@ Seerr --periodic request sync--> GXE Search Queue
                                   |-- authenticated dashboard/API
                                   |-- Radarr (one movie search command)
                                   |-- Sonarr (one episode search command)
-                                  `-- Prowlarr (health check only in this preview)
+                                  `-- Prowlarr (health plus read-only indexer telemetry)
 ```
 
 The application polls Seerr every minute, checks service health every 30
 seconds, and runs one scheduling worker. It begins globally paused. Search
 commands are serialized, and an active or ambiguous persisted run prevents a
-new GXE operation. Ambiguous results require administrator reconciliation; the
-application does not blindly repeat a command after a timeout or restart.
+new GXE operation. On startup and periodically, GXE queries the manager for
+persisted command IDs and reconciles completed or failed operations. A command
+submission with no persisted ID, an unavailable manager, or an unknown command
+status remains blocked for administrator reconciliation; GXE never blindly
+repeats it.
 
 ## Scheduler
 
@@ -30,8 +33,10 @@ selection favors earlier episodes and rotates across series when possible.
 
 No-result searches use the approved escalating delays. Technical failures do
 not increment that content counter; because a technical retry policy has not
-been approved, the job is suspended for administrator action. An external
-command timeout is preserved as ambiguous instead of automatically retried.
+been approved, the job is suspended for administrator action. If a persisted
+manager command reports completion after a restart, GXE checks queue/library
+state before recording a result and allows the same visibility window used by
+normal searches.
 
 ## Integrations and limits
 
@@ -40,8 +45,11 @@ and a preflight check for active searches are implemented from documented API
 surfaces. Live compatibility is still unverified. Seerr automatic search must
 be disabled by the administrator or it can bypass GXE.
 
-The Prowlarr adapter only checks service availability. It does not ingest 429
-events, respect `Retry-After`, apply indexer-specific cooldowns, or verify
+The Prowlarr adapter checks service availability and exposes a normalized,
+read-only view of configured indexers, Prowlarr-reported disabled windows, and
+aggregate query statistics from the previous 24 hours. These aggregate failures
+do not reliably identify HTTP 429 events. GXE does not ingest 429 events, respect
+`Retry-After`, apply indexer-specific cooldowns, control indexers, or verify
 query fan-out. Therefore the 10-minute GXE interval is not a guarantee of
 per-indexer protection. Do not claim that protection until experimentally
 validated. No external service database is accessed or modified.

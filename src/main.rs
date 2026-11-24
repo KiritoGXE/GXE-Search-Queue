@@ -61,9 +61,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .and_then(|value| value.parse().ok())
         .unwrap_or(8080);
     let address = api::parse_bind_address(&bind, port)?;
-    let web_dist = env::var("WEB_DIST").unwrap_or_else(|_| "/app/web".into());
-    let app = api::router(database.clone(), admin_token, web_dist.into());
     let integrations = Integrations::from_env()?;
+    let web_dist = env::var("WEB_DIST").unwrap_or_else(|_| "/app/web".into());
+    let app = api::router(
+        database.clone(),
+        admin_token,
+        web_dist.into(),
+        integrations.clone(),
+    );
     let worker_db = database.clone();
     let worker = tokio::spawn(async move {
         run_worker(worker_db, integrations).await;
@@ -109,6 +114,12 @@ async fn run_worker(database: Database, integrations: Integrations) {
         }
         let availability = integrations.availability_from_database(&database).await;
         if now - external_checked >= 10 {
+            if let Err(error) = integrations.reconcile_active_searches(&database).await {
+                tracing::warn!(%error, "Could not reconcile a persisted search; scheduler is waiting");
+                external_search_active = true;
+                external_checked = now;
+                continue;
+            }
             match integrations.has_external_search_active(availability).await {
                 Ok(active) => external_search_active = active,
                 Err(error) => {

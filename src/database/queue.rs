@@ -348,6 +348,17 @@ impl Database {
         rows.into_iter().map(QueueJob::try_from).collect()
     }
 
+    pub async fn queue_job(&self, job_id: &str) -> Result<Option<QueueJob>, DatabaseError> {
+        let row = sqlx::query_as::<_, QueueJobRow>(
+            "SELECT id, media_type, media_key, title, series_key, episode_sort_key, external_manager_id, state, priority, eligible_at, next_attempt_at, no_result_attempts, first_requested_at \
+             FROM queue_jobs WHERE id=?",
+        )
+        .bind(job_id)
+        .fetch_optional(self.pool())
+        .await?;
+        row.map(QueueJob::try_from).transpose()
+    }
+
     pub async fn deactivate_seerr_request(
         &self,
         external_id: &str,
